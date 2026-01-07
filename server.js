@@ -7,7 +7,7 @@ const app = express();
 const PORT = process.env.PORT || 8080;
 
 // Azure Blob Storage Configuration
-const STORAGE_ACCOUNT = process.env.STORAGE_ACCOUNT || "photoshare123";
+const STORAGE_ACCOUNT = process.env.STORAGE_ACCOUNT || "photosharestorage";
 const CONTAINER_NAME = "photos";
 const METADATA_CONTAINER = "metadata";
 const SAS_TOKEN = process.env.SAS_TOKEN || "sv=2024-11-04&ss=b&srt=co&sp=rwdctfx&se=2026-01-07T04:01:36Z&st=2026-01-06T19:46:36Z&spr=https&sig=JzbWbKVLzdBwWMmaZ6KeG2qRLRJui%2Ft8U1On3VPbqKU%3D";
@@ -20,18 +20,13 @@ console.log('💾 Storage Account:', STORAGE_ACCOUNT);
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Logging middleware
 app.use((req, res, next) => {
     console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
     next();
-});
-
-// Error handling middleware
-app.use((err, req, res, next) => {
-    console.error('❌ Error:', err);
-    res.status(500).json({ error: 'Internal server error', details: err.message });
 });
 
 // Helper function
@@ -47,6 +42,29 @@ async function streamToString(readableStream) {
 // Get Blob Service Client
 function getBlobServiceClient() {
     return new BlobServiceClient(`${BLOB_SERVICE_URL}?${SAS_TOKEN}`);
+}
+
+// Initialize containers on startup
+async function initializeContainers() {
+    try {
+        console.log('🔧 Initializing storage containers...');
+        const blobServiceClient = getBlobServiceClient();
+        
+        // Create photos container if it doesn't exist
+        const photoContainer = blobServiceClient.getContainerClient(CONTAINER_NAME);
+        await photoContainer.createIfNotExists({ access: 'blob' });
+        console.log('✅ Photos container ready');
+        
+        // Create metadata container if it doesn't exist
+        const metadataContainer = blobServiceClient.getContainerClient(METADATA_CONTAINER);
+        await metadataContainer.createIfNotExists({ access: 'blob' });
+        console.log('✅ Metadata container ready');
+        
+        return true;
+    } catch (error) {
+        console.error('❌ Error initializing containers:', error);
+        return false;
+    }
 }
 
 // Health check
@@ -72,7 +90,8 @@ app.get('/api/photos', async (req, res) => {
         // Check if container exists
         const containerExists = await metadataContainer.exists();
         if (!containerExists) {
-            console.log('⚠️ Metadata container does not exist, returning empty array');
+            console.log('⚠️ Metadata container does not exist, creating it...');
+            await metadataContainer.createIfNotExists({ access: 'blob' });
             return res.json([]);
         }
 
@@ -84,7 +103,7 @@ app.get('/api/photos', async (req, res) => {
                     const photoData = await streamToString(downloadResponse.readableStreamBody);
                     photos.push(JSON.parse(photoData));
                 } catch (blobError) {
-                    console.error('❌ Error reading blob:', blob.name, blobError);
+                    console.error('❌ Error reading blob:', blob.name, blobError.message);
                 }
             }
         }
@@ -102,40 +121,79 @@ app.get('/api/photos', async (req, res) => {
 app.post('/api/photos', async (req, res) => {
     try {
         console.log('📤 Upload photo request received');
+        console.log('Request body keys:', Object.keys(req.body));
+        
         const { title, caption, location, tags, imageData, fileName } = req.body;
 
-        if (!title || !imageData || !fileName) {
-            console.log('⚠️ Missing required fields');
-            return res.status(400).json({ error: 'Title, imageData, and fileName required' });
+        if (!title) {
+            console.log('⚠️ Missing title');
+            return res.status(400).json({ error: 'Title is required' });
+        }
+
+        if (!imageData) {
+            console.log('⚠️ Missing imageData');
+            return res.status(400).json({ error: 'Image data is required' });
+        }
+
+        if (!fileName) {
+            console.log('⚠️ Missing fileName');
+            return res.status(400).json({ error: 'File name is required' });
         }
 
         const photoId = Date.now().toString();
-        const blobName = `${photoId}-${fileName}`;
+        const sanitizedFileName = fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
+        const blobName = `${photoId}-${sanitizedFileName}`;
 
         console.log(`📷 Uploading photo: ${blobName}`);
         const blobServiceClient = getBlobServiceClient();
         
-        // Upload image
+        // Ensure containers exist
         const containerClient = blobServiceClient.getContainerClient(CONTAINER_NAME);
+        await containerClient.createIfNotExists({ access: 'blob' });
+        
+        const metadataContainer = blobServiceClient.getContainerClient(METADATA_CONTAINER);
+        await metadataContainer.createIfNotExists({ access: 'blob' });
+        
+        // Upload image
         const blockBlobClient = containerClient.getBlockBlobClient(blobName);
 
-        const base64Data = imageData.split(',')[1];
-        const buffer = Buffer.from(base64Data, 'base64');
+        // Handle base64 data
+        let buffer;
+        if (imageData.includes('base64,')) {
+            const base64Data = imageData.split(',')[1];
+            buffer = Buffer.from(base64Data, 'base64');
+        } else {
+            buffer = Buffer.from(imageData, 'base64');
+        }
+
+        console.log(`📦 Uploading ${buffer.length} bytes...`);
+        
+        // Determine content type
+        let contentType = 'image/jpeg';
+        if (fileName.toLowerCase().endsWith('.png')) {
+            contentType = 'image/png';
+        } else if (fileName.toLowerCase().endsWith('.gif')) {
+            contentType = 'image/gif';
+        }
 
         await blockBlobClient.upload(buffer, buffer.length, {
-            blobHTTPHeaders: { blobContentType: 'image/jpeg' }
+            blobHTTPHeaders: { blobContentType: contentType }
         });
 
+        console.log('✅ Image uploaded to blob storage');
+
+        // Public URL without SAS for display (SAS is in connection)
         const imageUrl = `${BLOB_SERVICE_URL}/${CONTAINER_NAME}/${blobName}?${SAS_TOKEN}`;
 
         // Create metadata
         const photo = {
             id: photoId,
-            title,
+            title: title || 'Untitled',
             caption: caption || '',
             location: location || '',
             tags: tags || '',
             url: imageUrl,
+            fileName: sanitizedFileName,
             likes: 0,
             comments: [],
             rating: 0,
@@ -144,11 +202,12 @@ app.post('/api/photos', async (req, res) => {
         };
 
         // Save metadata
-        const metadataContainer = blobServiceClient.getContainerClient(METADATA_CONTAINER);
         const metadataBlobClient = metadataContainer.getBlockBlobClient(`${photoId}.json`);
+        const metadataJson = JSON.stringify(photo);
+        
         await metadataBlobClient.upload(
-            JSON.stringify(photo),
-            JSON.stringify(photo).length,
+            metadataJson,
+            metadataJson.length,
             { blobHTTPHeaders: { blobContentType: 'application/json' } }
         );
 
@@ -156,7 +215,12 @@ app.post('/api/photos', async (req, res) => {
         res.status(201).json(photo);
     } catch (error) {
         console.error('❌ Error uploading photo:', error);
-        res.status(500).json({ error: 'Failed to upload photo', details: error.message });
+        console.error('Error stack:', error.stack);
+        res.status(500).json({ 
+            error: 'Failed to upload photo', 
+            details: error.message,
+            stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+        });
     }
 });
 
@@ -181,14 +245,24 @@ app.delete('/api/photos/:photoId', async (req, res) => {
         const photoData = await streamToString(downloadResponse.readableStreamBody);
         const photo = JSON.parse(photoData);
 
+        // Delete the image blob
         const urlParts = photo.url.split('/');
         const blobNameWithParams = urlParts[urlParts.length - 1];
         const blobName = blobNameWithParams.split('?')[0];
 
         const photoContainer = blobServiceClient.getContainerClient(CONTAINER_NAME);
         const imageBlobClient = photoContainer.getBlobClient(blobName);
-        await imageBlobClient.delete();
+        
+        try {
+            await imageBlobClient.delete();
+            console.log('✅ Image blob deleted');
+        } catch (deleteError) {
+            console.error('⚠️ Could not delete image blob:', deleteError.message);
+        }
+        
+        // Delete metadata
         await metadataBlobClient.delete();
+        console.log('✅ Metadata deleted');
 
         console.log(`✅ Photo deleted successfully: ${photoId}`);
         res.json({ message: 'Photo deleted successfully', photoId });
@@ -205,9 +279,13 @@ app.post('/api/photos/:photoId/like', async (req, res) => {
         console.log(`❤️ Like photo request: ${photoId}`);
         
         const blobServiceClient = getBlobServiceClient();
-
         const metadataContainer = blobServiceClient.getContainerClient(METADATA_CONTAINER);
         const metadataBlobClient = metadataContainer.getBlobClient(`${photoId}.json`);
+
+        const exists = await metadataBlobClient.exists();
+        if (!exists) {
+            return res.status(404).json({ error: 'Photo not found' });
+        }
 
         const downloadResponse = await metadataBlobClient.download();
         const photoData = await streamToString(downloadResponse.readableStreamBody);
@@ -215,10 +293,14 @@ app.post('/api/photos/:photoId/like', async (req, res) => {
 
         photo.likes++;
 
+        const updatedJson = JSON.stringify(photo);
         await metadataBlobClient.upload(
-            JSON.stringify(photo),
-            JSON.stringify(photo).length,
-            { blobHTTPHeaders: { blobContentType: 'application/json' } }
+            updatedJson,
+            updatedJson.length,
+            { 
+                blobHTTPHeaders: { blobContentType: 'application/json' },
+                overwrite: true
+            }
         );
 
         console.log(`✅ Photo liked: ${photoId} (total likes: ${photo.likes})`);
@@ -245,6 +327,11 @@ app.post('/api/photos/:photoId/rate', async (req, res) => {
         const metadataContainer = blobServiceClient.getContainerClient(METADATA_CONTAINER);
         const metadataBlobClient = metadataContainer.getBlobClient(`${photoId}.json`);
 
+        const exists = await metadataBlobClient.exists();
+        if (!exists) {
+            return res.status(404).json({ error: 'Photo not found' });
+        }
+
         const downloadResponse = await metadataBlobClient.download();
         const photoData = await streamToString(downloadResponse.readableStreamBody);
         const photo = JSON.parse(photoData);
@@ -253,10 +340,14 @@ app.post('/api/photos/:photoId/rate', async (req, res) => {
         photo.rating = ((photo.rating * photo.ratingCount) + rating) / newRatingCount;
         photo.ratingCount = newRatingCount;
 
+        const updatedJson = JSON.stringify(photo);
         await metadataBlobClient.upload(
-            JSON.stringify(photo),
-            JSON.stringify(photo).length,
-            { blobHTTPHeaders: { blobContentType: 'application/json' } }
+            updatedJson,
+            updatedJson.length,
+            { 
+                blobHTTPHeaders: { blobContentType: 'application/json' },
+                overwrite: true
+            }
         );
 
         console.log(`✅ Photo rated: ${photoId} (avg: ${photo.rating.toFixed(2)})`);
@@ -277,18 +368,31 @@ app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// Start server
-app.listen(PORT, () => {
-    console.log('');
-    console.log('═══════════════════════════════════════════');
-    console.log('✅ PhotoShare Server Running!');
-    console.log('═══════════════════════════════════════════');
-    console.log(`📍 URL: http://localhost:${PORT}`);
-    console.log(`💾 Storage: ${STORAGE_ACCOUNT}`);
-    console.log(`🕒 Started: ${new Date().toLocaleString()}`);
-    console.log('═══════════════════════════════════════════');
-    console.log('');
+// Error handling middleware (must be last)
+app.use((err, req, res, next) => {
+    console.error('💥 Unhandled error:', err);
+    res.status(500).json({ 
+        error: 'Internal server error', 
+        details: err.message 
+    });
 });
+
+// Start server and initialize containers
+async function startServer() {
+    await initializeContainers();
+    
+    app.listen(PORT, () => {
+        console.log('');
+        console.log('═══════════════════════════════════════════');
+        console.log('✅ PhotoShare Server Running!');
+        console.log('═══════════════════════════════════════════');
+        console.log(`📍 URL: http://localhost:${PORT}`);
+        console.log(`💾 Storage: ${STORAGE_ACCOUNT}`);
+        console.log(`🕒 Started: ${new Date().toLocaleString()}`);
+        console.log('═══════════════════════════════════════════');
+        console.log('');
+    });
+}
 
 // Handle uncaught errors
 process.on('uncaughtException', (error) => {
@@ -297,4 +401,10 @@ process.on('uncaughtException', (error) => {
 
 process.on('unhandledRejection', (reason, promise) => {
     console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
+// Start the server
+startServer().catch(error => {
+    console.error('💥 Failed to start server:', error);
+    process.exit(1);
 });
