@@ -374,32 +374,83 @@
 
         async function handleUpload() {
             const title = document.getElementById('title').value;
-            if (!title || !selectedFile) {
-                alert('⚠️ Please select an image and enter a title');
+            
+            console.log('Upload clicked');
+            console.log('Title:', title);
+            console.log('Selected file:', selectedFile);
+            
+            if (!title || !title.trim()) {
+                alert('⚠️ Please enter a title for your photo');
                 return;
             }
+            
+            if (!selectedFile) {
+                alert('⚠️ Please select an image file');
+                return;
+            }
+
+            // Show loading state
+            const uploadBtn = document.getElementById('uploadBtn');
+            const originalText = uploadBtn.textContent;
+            uploadBtn.disabled = true;
+            uploadBtn.textContent = '⏳ Uploading...';
 
             try {
                 const reader = new FileReader();
                 reader.onload = async (e) => {
-                    const photoData = {
-                        title,
-                        caption: document.getElementById('caption').value,
-                        location: document.getElementById('location').value,
-                        tags: document.getElementById('tags').value,
-                        imageData: e.target.result,
-                        fileName: selectedFile.name
-                    };
+                    try {
+                        console.log('File read complete, sending to server...');
+                        
+                        const photoData = {
+                            title: title.trim(),
+                            caption: document.getElementById('caption').value || '',
+                            location: document.getElementById('location').value || '',
+                            tags: document.getElementById('tags').value || '',
+                            imageData: e.target.result,
+                            fileName: selectedFile.name
+                        };
 
-                    const newPhoto = await api.uploadPhoto(photoData);
-                    photos.unshift(newPhoto);
-                    currentTab = 'feed';
-                    selectedFile = null;
-                    render();
-                    alert('✅ Photo uploaded successfully!');
+                        console.log('Uploading photo data:', {
+                            title: photoData.title,
+                            fileName: photoData.fileName,
+                            dataLength: photoData.imageData.length
+                        });
+
+                        const newPhoto = await api.uploadPhoto(photoData);
+                        console.log('Photo uploaded successfully:', newPhoto);
+                        
+                        photos.unshift(newPhoto);
+                        currentTab = 'feed';
+                        selectedFile = null;
+                        
+                        // Clear form
+                        document.getElementById('title').value = '';
+                        document.getElementById('caption').value = '';
+                        document.getElementById('location').value = '';
+                        document.getElementById('tags').value = '';
+                        
+                        render();
+                        alert('✅ Photo uploaded successfully!');
+                    } catch (uploadError) {
+                        console.error('Upload error:', uploadError);
+                        uploadBtn.disabled = false;
+                        uploadBtn.textContent = originalText;
+                        alert('❌ Upload failed: ' + uploadError.message);
+                    }
                 };
+                
+                reader.onerror = (error) => {
+                    console.error('File read error:', error);
+                    uploadBtn.disabled = false;
+                    uploadBtn.textContent = originalText;
+                    alert('❌ Failed to read file');
+                };
+                
                 reader.readAsDataURL(selectedFile);
             } catch (error) {
+                console.error('Upload error:', error);
+                uploadBtn.disabled = false;
+                uploadBtn.textContent = originalText;
                 alert('❌ Upload failed: ' + error.message);
             }
         }
