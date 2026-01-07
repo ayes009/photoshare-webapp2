@@ -1,7 +1,7 @@
 {
   "name": "photoshare-webapp",
   "version": "1.0.0",
-  "description": "PhotoShare Cloud Native Platform",
+  "description": "PhotoShare App",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
